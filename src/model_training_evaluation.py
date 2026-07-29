@@ -59,7 +59,7 @@ from sklearn.metrics import (
 )
 from xgboost import XGBClassifier
 
-from carga_datos import cargarDatos
+from cargar_datos import cargarDatos
 from ft_engineering import dividir_y_transformar
 
 RANDOM_STATE = 42
