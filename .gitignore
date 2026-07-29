@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Registro de predicciones de la API (log de runtime, se regenera con el uso)
+src/registro_predicciones.csv

@@ -1,5 +1,6 @@
 pandas
 numpy
+scipy
 openpyxl
 python-dotenv
 db-dtypes
@@ -7,10 +8,14 @@ jupyter
 notebook
 ipykernel
 seaborn
+matplotlib
 ipywidgets
 scikit-learn
 xgboost
+joblib
 pydantic
 fastapi
 feature-engine
 uvicorn[standard]
+streamlit
+requests
