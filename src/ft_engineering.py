@@ -26,7 +26,7 @@ from feature_engine.imputation import (
 )
 from feature_engine.outliers import Winsorizer
 
-from carga_datos import cargarDatos
+from cargar_datos import cargarDatos
 
 TARGET = "Pago_atiempo"
 
