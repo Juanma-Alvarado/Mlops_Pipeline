@@ -12,21 +12,47 @@ Una entidad financiera necesita anticipar el riesgo de no pago de sus clientes d
 ├── Base_de_datos.xlsx        # Dataset de créditos otorgados
 ├── requirements.txt
 └── src/
-    ├── carga_datos.py                  # Carga del dataset (v1.0.1)
+    ├── cargar_datos.py                 # Carga del dataset (v1.0.1)
     ├── comprension_eda.ipynb           # EDA: univariable, bivariable, multivariable (v1.0.1)
     ├── ft_engineering.py               # Pipeline de feature engineering (v1.1.0)
     ├── model_training_evaluation.py    # Entrenamiento y evaluación (v1.1.1)
+    ├── model_deploy.py                 # API REST con FastAPI (v1.2.0)
+    ├── model_monitoring.py             # Monitoreo y data drift (v1.2.1)
+    ├── app_streamlit.py                # App web: scoring + dashboard de drift (v1.2.2)
     ├── modelo_riesgo_credito.pkl       # Pipeline + modelo + umbral serializados
     ├── curvas_evaluacion.png           # Curvas ROC y Precision-Recall del modelo elegido
-    ├── model_deploy.py
-    └── model_monitoring.py
+    ├── predicciones_historicas.csv     # Datos + pronósticos (insumo del monitoreo)
+    ├── metricas_drift.csv              # Métricas de drift por variable
+    ├── drift_temporal.csv              # Evolución del drift por periodo
+    └── ejemplo_lote.csv                # Plantilla para la carga masiva de la app
 ```
 
 ## Ramas
 
 - `developer`: desarrollo activo.
 - `certification`: integración de avances cerrados.
-- `master`: versión estable / entrega final.
+- `main`: versión estable / entrega final.
+
+## Cómo correr el proyecto
+
+```bash
+python -m venv venv
+source venv/bin/activate          # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+Los scripts se ejecutan **desde `src/`**, porque el artefacto serializado necesita que `ft_engineering` sea importable (ver el avance 3):
+
+```bash
+cd src
+
+python ft_engineering.py                # pipeline + chequeos de sanidad
+python model_training_evaluation.py     # entrena, evalúa y guarda el modelo
+python model_monitoring.py              # reporte de data drift
+
+uvicorn model_deploy:app --reload        # API + doc en http://localhost:8000/docs
+streamlit run app_streamlit.py          # app web (requiere la API arriba)
+```
 
 ## Estado del proyecto
 
@@ -116,4 +142,76 @@ Curvas ROC y Precision-Recall en `src/curvas_evaluacion.png`.
 - Probar técnicas de remuestreo (SMOTE, undersampling) como alternativa al ponderado de clases.
 - Definir con negocio el costo relativo de un falso negativo vs. un falso positivo, para reemplazar F1 por un criterio de umbral basado en costo real.
 
-**Avances 3 y 4:** monitoreo de *data drift*, app en Streamlit, API con FastAPI y contenerización con Docker — pendientes.
+**Avance 3 (cerrado):**
+
+### Paso previo — arreglo de bloqueadores
+
+El proyecto no corría. `ft_engineering.py` y `model_training_evaluation.py` importaban `from Mlops_Pipeline.src.cargar_datos import cargarDatos`, que falla con `ModuleNotFoundError` porque no existe ningún `__init__.py` ni el directorio padre está en `sys.path`. Se volvió al import plano.
+
+Quedó documentada además una restricción que condiciona el despliegue: el `.pkl` guarda los transformadores personalizados como una **referencia al módulo** `ft_engineering`, no su código. Por eso `joblib.load` solo funciona si ese módulo es importable, y tanto la API como el monitoreo insertan su propio directorio en `sys.path` al arrancar. Al contenerizar (avance 4) esto se traduce en `PYTHONPATH=/app/src`.
+
+### v1.2.0 — API con FastAPI (`src/model_deploy.py`)
+
+El modelo se carga **una sola vez** al arranque vía el evento `lifespan`, no por request.
+
+| Método | Ruta | Qué hace |
+|---|---|---|
+| GET | `/salud` | Healthcheck |
+| GET | `/modelo` | Metadata: umbral, métricas de test, variables excluidas por leakage |
+| POST | `/predecir` | Una solicitud → probabilidad, decisión y banda de riesgo |
+| POST | `/predecir-lote` | Scoring masivo en una sola llamada |
+
+**El contrato pide 17 variables, no 22.** Es consecuencia directa del avance 2: las 5 variables con data leakage no existen cuando hay que aprobar un crédito nuevo, así que pedirlas sería incoherente. La API solo acepta información disponible en el momento real de la decisión.
+
+**La respuesta devuelve el umbral explícitamente.** La decisión se toma en 0.5407, no en 0.5, y quien consuma la API necesita poder auditar con qué criterio se marcó a un cliente. `puntaje_datacredito` y `promedio_ingresos_datacredito` son opcionales, porque su ausencia es un caso legítimo que el pipeline ya trata como señal de riesgo propia.
+
+Cada predicción se registra en `src/registro_predicciones.csv`, que es el insumo del monitoreo.
+
+### v1.2.1 — Monitoreo y data drift (`src/model_monitoring.py`)
+
+Compara la población de **referencia** (nov 2024 – jun 2025, 8.378 créditos) contra la **actual** (jul 2025 – abr 2026, 2.385 créditos), con corte en `2025-07-01`.
+
+**Hallazgo principal: hay drift real, no hubo que simular nada.**
+
+| Variable | PSI | KS | Jensen-Shannon | Estado |
+|---|---|---|---|---|
+| `promedio_ingresos_datacredito` | 0.3272 | 0.2258 | 0.0562 | 🔴 severo |
+| `total_otros_prestamos` | 0.1819 | 0.1401 | 0.0313 | 🟡 moderado |
+| `plazo_meses` | 0.1129 | 0.1620 | 0.2249 | 🟡 moderado |
+| `cuota_pactada` | 0.0779 | 0.1243 | 0.1131 | 🟢 estable |
+| `capital_prestado` | 0.0526 | 0.0846 | 0.0834 | 🟢 estable |
+
+Semáforo global: **1 severo, 2 moderados, 13 estables.** Umbrales estándar de PSI: `<0.10` verde, `0.10–0.25` amarillo, `>0.25` rojo.
+
+**Por qué el KS no basta.** Cinco variables más dan p-valor < 0.05 pero PSI por debajo de 0.05. Con 8.378 registros de referencia, las pruebas de hipótesis detectan como significativas diferencias demasiado pequeñas para afectar al modelo. El monitoreo reporta ambas métricas y solo alerta cuando el PSI —que mide magnitud, no significancia— lo justifica.
+
+**La tasa de mora cayó de 5.19% a 3.19%, y eso no es una buena noticia.** Significa que la población que el modelo está evaluando ya no es la que aprendió. Un modelo entrenado sobre clientes con 5.19% de mora aplicado a clientes con 3.19% sobreestima el riesgo de forma sistemática, que es exactamente lo que se observa: la mora predicha es de 10–14% por mes contra 3–6% real, una brecha promedio de **8.4 puntos**. Parte viene de `class_weight="balanced"`, que a cambio de detectar más morosos infla la predicción de la clase minoritaria.
+
+**Dos correcciones metodológicas que hicieron falta:**
+
+1. **El PSI se disparaba por muestras chicas, no por drift.** Con un épsilon fijo de `1e-6` para los bins vacíos, enero de 2026 (89 valores no nulos) daba PSI 3.27, de los cuales **3.08 venían de solo dos bins vacíos** — un falso positivo severo. Se reemplazó por suavizado de Laplace, `(conteo + 0.5) / (n + 0.5·bins)`, cuya corrección escala con el tamaño de muestra. El mismo mes pasó a 0.975, y las métricas globales apenas se movieron (0.3298 → 0.3272), que es la señal de que el arreglo solo toca lo que debía tocar. Se añadió además un mínimo de 50 observaciones no nulas por variable y periodo.
+
+2. **La detección de tendencias era inútil y las alertas eran ruido.** Exigir que el PSI creciera en *cada* periodo es un criterio que ninguna serie real cumple; se cambió por correlación de Spearman ≥ 0.7. Y al implementar la detección de saltos abruptos, el sistema pasó a emitir 14 alertas, varias sobre variables con PSI de 0.06 y una marcando como "cambio abrupto" una *caída* de 0.434 a 0.187, que es una mejora. Se filtró a variables que cruzan el umbral moderado y a saltos solo hacia arriba: quedaron 11 alertas accionables. Un tablero que alarma por buenas noticias enseña al usuario a ignorarlo.
+
+**Análisis temporal.** Cada periodo se compara contra la referencia fija, no contra el periodo anterior: comparando con el anterior, una deriva lenta y sostenida pasaría desapercibida porque cada mes se parece a su vecino mientras la población se aleja del modelo. Se distingue tendencia (deriva gradual → reentrenar) de salto abrupto (probable cambio operativo o dato roto → revisar la fuente antes de reentrenar).
+
+### v1.2.2 — App Streamlit (`src/app_streamlit.py`)
+
+Dos pantallas, consumiendo la API por HTTP con la URL en la variable de entorno `API_URL`.
+
+**Scoring de solicitudes:** formulario con las 17 variables y carga masiva por CSV (`src/ejemplo_lote.csv` sirve de plantilla). El resultado se presenta como banda de riesgo con la probabilidad.
+
+**Monitoreo de drift:** semáforo agregado, tabla de métricas con barras de riesgo, histogramas de referencia vs. actual, evolución del PSI con las bandas de alerta, comparación de mora observada vs. predicha, y las recomendaciones automáticas.
+
+La app consume la API en vez de cargar el `.pkl` directamente para que exista **una sola implementación** de la lógica de scoring. Si la app cargara el modelo por su cuenta habría dos caminos de inferencia que mantener sincronizados.
+
+`app_streamlit.py` no forma parte de la estructura de carpetas definida por el enunciado, pero Streamlit necesita su propio punto de entrada. No reemplaza a ninguno de los archivos exigidos.
+
+**Bug encontrado al probar la carga masiva:** `df.where(pd.notna(df), None)` no convierte NaN en None sobre columnas float — pandas lo vuelve a coercer a NaN, que no es JSON válido, y el envío falla. Habría roto la carga de cualquier CSV con datos del buró faltantes, o sea el 27% de las filas reales. Se corrigió con `df.astype(object).where(...)`.
+
+**Backlog del avance 3:**
+- Reentrenar con datos recientes, que es lo que el propio monitoreo recomienda.
+- Recalibrar la probabilidad (`CalibratedClassifierCV`) para cerrar la brecha de 8.4 puntos entre mora predicha y observada.
+- Apuntar el monitoreo a `registro_predicciones.csv` cuando haya tráfico real, en vez de al histórico scoreado.
+
+**Avance 4:** contenerización con Docker y CI/CD — pendiente.
