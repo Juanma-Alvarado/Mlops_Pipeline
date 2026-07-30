@@ -9,8 +9,13 @@ Una entidad financiera necesita anticipar el riesgo de no pago de sus clientes d
 ## Estructura del repositorio
 
 ```
-├── Base_de_datos.xlsx        # Dataset de créditos otorgados
-├── requirements.txt
+├── Base_de_datos.xlsx          # Dataset de créditos otorgados
+├── requirements.txt            # Dependencias de desarrollo (versiones fijadas)
+├── requirements-docker.txt     # Dependencias de runtime para la imagen
+├── Dockerfile                  # Imagen única para API y app (v1.3.0)
+├── docker-compose.yml           # Orquestación de los dos servicios (v1.3.0)
+├── .dockerignore
+├── .github/workflows/ci.yml    # CI: build + verificación de los servicios (v1.3.1)
 └── src/
     ├── cargar_datos.py                 # Carga del dataset (v1.0.1)
     ├── comprension_eda.ipynb           # EDA: univariable, bivariable, multivariable (v1.0.1)
@@ -34,6 +39,27 @@ Una entidad financiera necesita anticipar el riesgo de no pago de sus clientes d
 - `main`: versión estable / entrega final.
 
 ## Cómo correr el proyecto
+
+### Con Docker (recomendado)
+
+Un solo comando levanta la API y la app:
+
+```bash
+docker compose up --build
+```
+
+- API con documentación interactiva: **http://localhost:8000/docs**
+- App web: **http://localhost:8501**
+
+Streamlit espera automáticamente a que el modelo termine de cargar, así que la app está lista cuando responde. Para apagar:
+
+```bash
+docker compose down
+```
+
+El log de predicciones vive en un volumen y sobrevive al `down`. Para borrarlo también: `docker compose down -v`.
+
+### En local, sin Docker
 
 ```bash
 python -m venv venv
@@ -214,4 +240,66 @@ La app consume la API en vez de cargar el `.pkl` directamente para que exista **
 - Recalibrar la probabilidad (`CalibratedClassifierCV`) para cerrar la brecha de 8.4 puntos entre mora predicha y observada.
 - Apuntar el monitoreo a `registro_predicciones.csv` cuando haya tráfico real, en vez de al histórico scoreado.
 
-**Avance 4:** contenerización con Docker y CI/CD — pendiente.
+**Avance 4 (cerrado):**
+
+### v1.3.0 — Contenerización
+
+**Una sola imagen para los dos servicios.** La API y la app comparten código, dependencias y modelo; lo único que cambia es el comando de arranque. Mantener dos imágenes obligaría a construir dos veces las mismas librerías.
+
+| Servicio | Puerto | Comando |
+|---|---|---|
+| `api` | 8000 | `uvicorn model_deploy:app --host 0.0.0.0 --port 8000` |
+| `app` | 8501 | `streamlit run app_streamlit.py --server.address=0.0.0.0` |
+
+**La imagen base está fijada al patch: `python:3.14.6-slim`.** No es exceso de celo. `modelo_riesgo_credito.pkl` se serializó con Python 3.14.6 y scikit-learn 1.9.0, y un pickle de sklearn cargado con otra versión emite `InconsistentVersionWarning` o falla al reconstruir los estimadores. Por la misma razón se fijaron **todas** las versiones en `requirements.txt`, que hasta este avance no tenía ninguna: dos instalaciones hechas en fechas distintas podían producir resultados distintos contra el mismo artefacto.
+
+**`PYTHONPATH=/app/src` en vez de depender del directorio de trabajo.** El pickle guarda los transformadores personalizados como una *referencia al módulo* `ft_engineering`, no su código, así que `joblib.load` necesita poder importarlo. Hasta ahora eso obligaba a ejecutar todo desde `src/`; en el contenedor queda resuelto de forma explícita.
+
+**`requirements-docker.txt` separado.** El runtime excluye `xgboost` y `matplotlib` — verificado que solo los importa `model_training_evaluation.py`, que no corre en el contenedor porque el modelo llega ya entrenado — más jupyter, notebook, ipykernel, ipywidgets, seaborn y db-dtypes. Son las dependencias más pesadas del proyecto y ninguna hace falta para servir.
+
+**`.dockerignore` obligatorio.** El contexto de build sin filtrar pesa **1.6 GB, de los cuales `venv/` es prácticamente todo**. Docker lo copiaría íntegro al daemon en cada build.
+
+Imagen final: **1.2 GB**.
+
+**Bug encontrado al verificar el volumen.** El log de predicciones no se escribía: `[Errno 13] Permission denied: '/app/registro/registro_predicciones.csv'`. La causa es que Docker inicializa un volumen nombrado copiando permisos del directorio que exista **en la imagen**, y si no existe lo crea como `root` — pero el contenedor corre como `appuser` por seguridad. Se resolvió creando `/app/registro` en el Dockerfile con el dueño correcto antes de cambiar de usuario.
+
+El fallo era silencioso: `registrar_predicciones` captura las excepciones de escritura a propósito, para que un problema en el log no tumbe una predicción ya calculada. Buen diseño defensivo, pero significa que sin revisar los logs el problema no se nota.
+
+**`depends_on` con `condition: service_healthy`.** Sin la condición, Streamlit arranca antes de que el modelo termine de cargar y la barra lateral muestra "API no disponible" en el primer render, obligando a recargar. El healthcheck apunta a `/salud`, que confirma que el modelo quedó en memoria y no solo que el proceso vive.
+
+### v1.3.1 — CI/CD con GitHub Actions
+
+`.github/workflows/ci.yml` corre en cada push a `developer`, `certification` y `main`.
+
+**No se limita a comprobar que la imagen compila.** Un build puede construirse perfectamente y devolver 500 al predecir — exactamente lo que pasaría si una versión de scikit-learn dejara de ser compatible con el pickle. El workflow levanta los servicios y verifica:
+
+- El healthcheck de la API y `GET /salud` con `modelo_cargado: true`.
+- `GET /modelo` devuelve el umbral.
+- **`POST /predecir` contra un valor conocido:** la solicitud de `.github/workflows/solicitud_prueba.json` debe dar `probabilidad_mora: 0.657709`. Si cambia, alguna dependencia dejó de ser compatible con el modelo serializado.
+- Que los campos del buró siguen siendo opcionales.
+- Que la validación rechaza datos inválidos (`edad_cliente: 9` → 422).
+- Que Streamlit responde en `/_stcore/health`.
+- Que la app alcanza la API por su **nombre de servicio** dentro de la red de compose.
+- Que no aparece ningún `InconsistentVersionWarning` en los logs.
+
+### Verificación realizada
+
+Sobre el stack levantado con `docker compose up`:
+
+| Comprobación | Resultado |
+|---|---|
+| Ambos servicios | `healthy` |
+| `POST /predecir` | `0.657709` — **idéntico a fuera del contenedor** |
+| Avisos de versión de sklearn | 0 |
+| Log de predicciones en el volumen | Escribe, y **persiste tras `down` + `up`** |
+| Usuario del contenedor | `uid=1000(appuser)`, sin privilegios |
+| App → API por nombre de servicio | `http://api:8000` responde |
+| Ambas pantallas de Streamlit | Renderizan dentro del contenedor |
+| `model_monitoring.py` en el contenedor | 1 rojo, 2 amarillo, 13 verde |
+
+Que la probabilidad sea idéntica dentro y fuera del contenedor es el criterio que de verdad prueba que el fijado de versiones funcionó.
+
+**Backlog del avance 4:**
+- Publicar la imagen en un registro (GHCR o Docker Hub) desde el workflow, con tags por versión.
+- Reducir la imagen con un build multi-etapa; buena parte del 1.2 GB son las librerías científicas, difíciles de recortar más sin sacrificar funcionalidad.
+- Extender el CI a los pendientes del avance 3: reentrenamiento por el drift severo y recalibración de la probabilidad.

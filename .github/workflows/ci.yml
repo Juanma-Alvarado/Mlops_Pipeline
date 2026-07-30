@@ -1,0 +1,145 @@
+# Integración continua del modelo de riesgo crediticio (PIM5).
+#
+# No basta con verificar que la imagen se construye: un build puede compilar
+# perfectamente y devolver 500 al predecir, que es justo lo que pasaría si una
+# versión de scikit-learn dejara de ser compatible con el pickle del modelo.
+# Por eso el workflow levanta los servicios y hace una predicción real,
+# comparando el resultado contra un valor conocido.
+
+name: CI
+
+on:
+  push:
+    branches: [developer, certification, main]
+  pull_request:
+    branches: [developer, certification, main]
+  workflow_dispatch:
+
+jobs:
+  docker:
+    name: Build y verificación de los servicios
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Clonar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Construir la imagen
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: pim5-riesgo-credito:1.3.0
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Levantar los servicios
+        run: docker compose up -d
+
+      # El healthcheck de la API confirma que el modelo quedó cargado en
+      # memoria, no solo que el proceso arrancó.
+      - name: Esperar a que la API esté saludable
+        run: |
+          for i in $(seq 1 40); do
+            estado=$(docker inspect --format '{{.State.Health.Status}}' pim5-api 2>/dev/null || echo "arrancando")
+            echo "intento $i: $estado"
+            if [ "$estado" = "healthy" ]; then exit 0; fi
+            if [ "$estado" = "unhealthy" ]; then
+              echo "La API quedó unhealthy. Logs:"
+              docker compose logs api
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "Timeout esperando el healthcheck. Logs:"
+          docker compose logs api
+          exit 1
+
+      - name: Verificar GET /salud
+        run: |
+          respuesta=$(curl -sf http://localhost:8000/salud)
+          echo "$respuesta"
+          echo "$respuesta" | grep -q '"modelo_cargado":true'
+
+      - name: Verificar GET /modelo
+        run: |
+          respuesta=$(curl -sf http://localhost:8000/modelo)
+          echo "$respuesta"
+          echo "$respuesta" | grep -q '"umbral_decision"'
+
+      # Este es el paso que de verdad protege el despliegue: una predicción
+      # real contra un valor conocido. Si una dependencia cambiara de forma
+      # incompatible con el pickle, la probabilidad cambiaría y esto falla.
+      - name: Verificar POST /predecir con un valor conocido
+        run: |
+          respuesta=$(curl -sf -X POST http://localhost:8000/predecir \
+            -H "Content-Type: application/json" \
+            -d @.github/workflows/solicitud_prueba.json)
+          echo "$respuesta"
+          echo "$respuesta" | grep -q '"probabilidad_mora":0.657709' \
+            || { echo "La probabilidad no coincide con el valor esperado (0.657709)."; \
+                 echo "Suele indicar que una dependencia dejó de ser compatible con el modelo serializado."; \
+                 exit 1; }
+          echo "$respuesta" | grep -q '"banda_riesgo":"alto"'
+
+      - name: Verificar que los campos del buró son opcionales
+        run: |
+          curl -sf -X POST http://localhost:8000/predecir \
+            -H "Content-Type: application/json" \
+            -d '{"tipo_credito":4,"fecha_prestamo":"2026-05-15T10:30:00","capital_prestado":2000000,"plazo_meses":12,"edad_cliente":35,"tipo_laboral":"Empleado","salario_cliente":3000000,"total_otros_prestamos":500000,"cuota_pactada":200000,"cant_creditosvigentes":2,"huella_consulta":3,"creditos_sectorFinanciero":2,"creditos_sectorCooperativo":0,"creditos_sectorReal":0}' \
+            | grep -q '"probabilidad_mora"'
+
+      - name: Verificar que la validación rechaza datos inválidos
+        run: |
+          codigo=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:8000/predecir \
+            -H "Content-Type: application/json" \
+            -d '{"tipo_credito":4,"fecha_prestamo":"2026-05-15T10:30:00","capital_prestado":2000000,"plazo_meses":12,"edad_cliente":9,"tipo_laboral":"Empleado","salario_cliente":3000000,"total_otros_prestamos":500000,"cuota_pactada":200000,"cant_creditosvigentes":2,"huella_consulta":3,"creditos_sectorFinanciero":2,"creditos_sectorCooperativo":0,"creditos_sectorReal":0}')
+          echo "edad_cliente=9 -> HTTP $codigo (se espera 422)"
+          [ "$codigo" = "422" ]
+
+      - name: Verificar la app Streamlit
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8501/_stcore/health >/dev/null; then
+              echo "Streamlit responde."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Streamlit no respondió. Logs:"
+          docker compose logs app
+          exit 1
+
+      # Comprueba que la app puede alcanzar la API por su nombre de servicio
+      # dentro de la red de compose, que es la integración que el usuario ve.
+      - name: Verificar la conexión app -> API
+        run: |
+          docker compose exec -T app python -c "
+          import os, requests, sys
+          respuesta = requests.get(os.environ['API_URL'] + '/salud', timeout=10).json()
+          print(respuesta)
+          sys.exit(0 if respuesta.get('modelo_cargado') else 1)"
+
+      - name: Comprobar que no hay avisos de versión de scikit-learn
+        run: |
+          if docker compose logs api 2>&1 | grep -i "InconsistentVersionWarning"; then
+            echo "El modelo se serializó con otra versión de scikit-learn."
+            exit 1
+          fi
+          echo "Sin avisos de versión."
+
+      - name: Reportar el tamaño de la imagen
+        if: always()
+        run: docker images pim5-riesgo-credito --format "{{.Repository}}:{{.Tag}} = {{.Size}}"
+
+      - name: Logs en caso de fallo
+        if: failure()
+        run: docker compose logs
+
+      - name: Apagar los servicios
+        if: always()
+        run: docker compose down -v
