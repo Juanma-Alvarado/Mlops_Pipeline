@@ -1,0 +1,47 @@
+# Contexto de build de Docker.
+#
+# Sin este archivo el contexto pesa ~1.6 GB, de los cuales venv/ es
+# prácticamente todo: Docker lo copiaría íntegro al daemon en cada build.
+
+# Entorno virtual (el contenedor instala sus propias dependencias)
+venv/
+.venv/
+env/
+ENV/
+
+# Historial de git
+.git/
+.gitignore
+.github/
+
+# Caché de Python
+__pycache__/
+*.py[cod]
+*.so
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# Notebooks: el EDA no se sirve en el contenedor
+*.ipynb
+.ipynb_checkpoints/
+
+# Log de predicciones de la API: se genera en runtime y se monta como volumen
+src/registro_predicciones.csv
+
+# Documentación y archivos de Docker (no hacen falta dentro de la imagen)
+README.md
+LICENSE
+Dockerfile
+.dockerignore
+docker-compose.yml
+requirements.txt
+
+# Editores y sistema operativo
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Variables de entorno locales
+.env
