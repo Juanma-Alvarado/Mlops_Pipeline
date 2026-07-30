@@ -1,0 +1,70 @@
+# Orquestación del modelo de riesgo crediticio (PIM5).
+#
+# Levantar todo:
+#     docker compose up --build
+#
+#     API  -> http://localhost:8000/docs
+#     App  -> http://localhost:8501
+#
+# Los dos servicios salen de la MISMA imagen (ver Dockerfile) y solo difieren
+# en el comando: comparten código, dependencias y modelo.
+
+name: pim5-riesgo-credito
+
+services:
+  api:
+    build: .
+    image: pim5-riesgo-credito:1.3.0
+    container_name: pim5-api
+    ports:
+      - "8000:8000"
+    environment:
+      # Dentro del contenedor el log va a /app/registro/, que es el volumen.
+      # Si se dejara en src/ moriría con el contenedor.
+      RUTA_REGISTRO: /app/registro/registro_predicciones.csv
+    volumes:
+      - registro:/app/registro
+    restart: unless-stopped
+
+  app:
+    # Reutiliza la imagen que construye el servicio `api`; no se vuelve a
+    # construir. Solo cambia el comando de arranque.
+    build: .
+    image: pim5-riesgo-credito:1.3.0
+    container_name: pim5-app
+    ports:
+      - "8501:8501"
+    environment:
+      # Resolución por nombre de servicio en la red interna de compose. La app
+      # ya leía esta variable desde el avance 3, justamente para esto.
+      API_URL: http://api:8000
+    depends_on:
+      api:
+        # `service_healthy` y no un simple `depends_on`: sin esperar el
+        # healthcheck, Streamlit arranca antes de que el modelo termine de
+        # cargar y la barra lateral muestra "API no disponible" en el primer
+        # render, obligando al usuario a recargar.
+        condition: service_healthy
+    command:
+      - streamlit
+      - run
+      - app_streamlit.py
+      - --server.address=0.0.0.0
+      - --server.port=8501
+      - --server.headless=true
+      - --browser.gatherUsageStats=false
+    healthcheck:
+      # /_stcore/health es el endpoint interno de Streamlit.
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=4).status == 200 else 1)
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  registro:

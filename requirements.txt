@@ -1,21 +1,47 @@
-pandas
-numpy
-scipy
-openpyxl
-python-dotenv
-db-dtypes
-jupyter
-notebook
-ipykernel
-seaborn
-matplotlib
-ipywidgets
-scikit-learn
-xgboost
-joblib
-pydantic
-fastapi
-feature-engine
-uvicorn[standard]
-streamlit
-requests
+# Dependencias de DESARROLLO (incluye notebooks y entrenamiento).
+#
+# Las versiones están fijadas a propósito: el modelo serializado
+# (src/modelo_riesgo_credito.pkl) se creó con estas versiones exactas, y un
+# pickle de scikit-learn cargado con otra versión emite
+# InconsistentVersionWarning o directamente falla. Sin fijarlas, dos
+# instalaciones hechas en fechas distintas pueden dar resultados distintos
+# contra el mismo artefacto.
+#
+# Para la imagen Docker se usa requirements-docker.txt, que trae solo lo
+# necesario para servir el modelo.
+
+# Datos y cómputo numérico
+pandas==3.0.5
+numpy==2.5.1
+scipy==1.18.0
+openpyxl==3.1.5
+db-dtypes==1.7.1
+
+# Modelado
+scikit-learn==1.9.0
+feature_engine==1.9.4
+xgboost==3.3.0
+joblib==1.5.3
+
+# Visualización
+matplotlib==3.11.1
+seaborn==0.13.2
+altair==6.2.2
+
+# API
+fastapi==0.141.0
+uvicorn[standard]==0.52.0
+pydantic==2.13.4
+
+# App web
+streamlit==1.60.0
+requests==2.34.2
+
+# Notebooks
+jupyter==1.1.1
+notebook==7.6.1
+ipykernel==7.3.0
+ipywidgets==8.1.8
+
+# Utilidades
+python-dotenv==1.2.2
