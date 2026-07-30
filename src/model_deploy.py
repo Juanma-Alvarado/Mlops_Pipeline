@@ -39,7 +39,13 @@ if str(DIRECTORIO_SRC) not in sys.path:
     sys.path.insert(0, str(DIRECTORIO_SRC))
 
 RUTA_ARTEFACTO = DIRECTORIO_SRC / "modelo_riesgo_credito.pkl"
-RUTA_REGISTRO = DIRECTORIO_SRC / "registro_predicciones.csv"
+
+# La ruta del registro es configurable para poder montarla en un volumen de
+# Docker: así el log de predicciones sobrevive a `docker compose down` en vez
+# de morir con el contenedor.
+RUTA_REGISTRO = Path(
+    os.getenv("RUTA_REGISTRO", DIRECTORIO_SRC / "registro_predicciones.csv")
+)
 
 # Métricas del modelo en el set de test, medidas en el avance 2 (v1.1.1).
 # Se exponen en /modelo para que quien consuma la API sepa qué esperar y no

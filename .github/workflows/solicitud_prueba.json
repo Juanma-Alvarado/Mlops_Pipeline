@@ -1,0 +1,19 @@
+{
+  "tipo_credito": 9,
+  "fecha_prestamo": "2026-05-15T10:30:00",
+  "capital_prestado": 8000000,
+  "plazo_meses": 36,
+  "edad_cliente": 24,
+  "tipo_laboral": "Independiente",
+  "salario_cliente": 1200000,
+  "total_otros_prestamos": 9000000,
+  "cuota_pactada": 400000,
+  "cant_creditosvigentes": 9,
+  "huella_consulta": 14,
+  "creditos_sectorFinanciero": 6,
+  "creditos_sectorCooperativo": 2,
+  "creditos_sectorReal": 3,
+  "tendencia_ingresos": "Decreciente",
+  "puntaje_datacredito": 420,
+  "promedio_ingresos_datacredito": 600000
+}

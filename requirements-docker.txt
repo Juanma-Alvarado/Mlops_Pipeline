@@ -1,0 +1,33 @@
+# Dependencias de RUNTIME para la imagen Docker.
+#
+# Solo lo necesario para servir el modelo: la API, la app Streamlit y el
+# trabajo de monitoreo. Las versiones coinciden exactamente con las de
+# requirements.txt, porque el pickle del modelo depende de ellas.
+#
+# Se excluyen a propósito:
+#   - xgboost y matplotlib: solo los usa model_training_evaluation.py, que no
+#     se ejecuta dentro del contenedor (el modelo llega ya entrenado en el
+#     .pkl). Son las dos dependencias más pesadas del proyecto.
+#   - jupyter, notebook, ipykernel, ipywidgets: el EDA no se sirve.
+#   - seaborn y db-dtypes: sin uso en el código de runtime.
+
+# Datos y cómputo numérico
+pandas==3.0.5
+numpy==2.5.1
+scipy==1.18.0
+openpyxl==3.1.5
+
+# Necesarios para deserializar y aplicar el pipeline + modelo
+scikit-learn==1.9.0
+feature_engine==1.9.4
+joblib==1.5.3
+
+# API
+fastapi==0.141.0
+uvicorn[standard]==0.52.0
+pydantic==2.13.4
+
+# App web
+streamlit==1.60.0
+altair==6.2.2
+requests==2.34.2
